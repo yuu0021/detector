@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC 端：AI 自動柵欄</title>
+<style>
+  :root { --bg:#0e1322; --panel:#171e33; --line:#2b3658; --ink:#eaf0ff; --dim:#93a0c4; --acc:#4f7cff; --ok:#3ddc97; --stop:#ff5d5d; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--ink); font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; }
+  h1 { font-size:1.5rem; margin:0 0 6px; }
+  .sub { color:var(--dim); margin:0 0 16px; font-size:.95rem; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:16px; }
+  .ctl { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:.8rem; color:var(--dim); }
+  input { width:min(420px,80vw); padding:10px; font-size:.95rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); }
+  button { padding:10px 16px; font-size:.95rem; border:0; border-radius:8px; background:var(--acc); color:#fff; font-weight:600; }
+  button.gray { background:#2b3658; }
+  button:focus-visible, input:focus-visible { outline:3px solid #9db6ff; outline-offset:2px; }
+  #st { margin-top:10px; color:#8fb0ff; font-size:.95rem; }
+
+  /* 場景 */
+  #scene { position:relative; height:300px; border-radius:12px; overflow:hidden; background:linear-gradient(#27375f 0 55%, #3a3f4a 55%); border:1px solid var(--line); }
+  #road { position:absolute; left:0; right:0; bottom:60px; height:8px; background:repeating-linear-gradient(90deg,#e8e8e8 0 28px,transparent 28px 56px); opacity:.6; }
+  #post { position:absolute; left:52%; bottom:76px; width:34px; height:92px; background:#f2b100; border-radius:6px 6px 2px 2px; }
+  #lamp { position:absolute; left:calc(52% + 9px); bottom:150px; width:16px; height:16px; border-radius:50%; background:var(--stop); box-shadow:0 0 12px var(--stop); transition:background .3s, box-shadow .3s; }
+  #arm { position:absolute; left:calc(52% + 26px); bottom:140px; width:200px; height:14px; transform-origin:0 50%; transform:rotate(0deg);
+         background:repeating-linear-gradient(90deg,#f5f5f5 0 24px,#e53935 24px 48px); border-radius:4px; transition:transform 1.2s ease-in-out; }
+  #car { position:absolute; bottom:70px; left:-120px; font-size:64px; line-height:1; transition:left 3s ease-in-out; }
+  #car.wait { left:calc(52% - 140px); }
+  #car.go { left:105%; }
+  .open #arm { transform:rotate(-75deg); }
+  .open #lamp { background:var(--ok); box-shadow:0 0 12px var(--ok); }
+  #badge { position:absolute; top:12px; left:12px; padding:8px 14px; border-radius:20px; font-weight:700; background:#3a1d22; color:#ff9a9a; }
+  .open #badge { background:#14462f; color:#8af0bf; }
+  #log { max-height:150px; overflow:auto; font-size:.88rem; color:var(--dim); margin:0; padding-left:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🚧 PC 端：AI 自動柵欄</h1>
+  <p class="sub">手機偵測到汽車進入指定區域就發布 1，柵欄升起；汽車離開後發布 0，柵欄下降。</p>
+
+  <div class="panel">
+    <div class="ctl">
+      <label>MQTT Topic（柵欄控制）<input id="topic" value="nutc/im/s1411331002/gate"></label>
+      <button id="go">▶ 連線訂閱</button>
+      <button id="t1" class="gray">模擬 1</button>
+      <button id="t0" class="gray">模擬 0</button>
+    </div>
+    <div id="st">尚未連線</div>
+  </div>
+
+  <div class="panel">
+    <div id="scene">
+      <div id="badge">柵欄：關閉（0）</div>
+      <div id="road"></div>
+      <div id="post"></div><div id="lamp"></div><div id="arm"></div>
+      <div id="car" aria-hidden="true">🚗</div>
+    </div>
+  </div>
+
+  <div class="panel"><b>事件紀錄</b><ol id="log" reversed></ol></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const scene = $('scene'), car = $('car');
+let client = null, cur = -1;
+
+function setGate(v, src){
+  if (v === cur) return;
+  cur = v;
+  if (v === 1) {
+    scene.classList.add('open'); $('badge').textContent = '柵欄：升起（1）';
+    car.style.transition = 'none'; car.className = ''; void car.offsetWidth;   // 汽車從左側重新入場
+    car.style.transition = ''; car.className = 'wait';
+  } else {
+    scene.classList.remove('open'); $('badge').textContent = '柵欄：關閉（0）';
+    car.className = 'go';
+  }
+  const li = document.createElement('li');
+  li.textContent = `${new Date().toLocaleTimeString()}　收到 ${v}（${src}）→ 柵欄${v ? '升起' : '下降'}`;
+  $('log').prepend(li);
+}
+
+function connect(){
+  if (client) client.end(true);
+  const topic = $('topic').value.trim();
+  $('st').textContent = '連線中…';
+  client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId:'gate_pc_' + Math.random().toString(16).slice(2, 10), reconnectPeriod:2000 });
+  client.on('connect', () => client.subscribe(topic, e => $('st').textContent = e ? '訂閱失敗：' + e.message : `已訂閱 ${topic}，等待手機訊息…`));
+  client.on('close', () => $('st').textContent = '連線中斷，重試中…');
+  client.on('error', e => $('st').textContent = '錯誤：' + e.message);
+  client.on('message', (t, buf) => {
+    const s = buf.toString().trim();
+    if (s === '1' || s === '0') setGate(+s, 'MQTT');
+  });
+}
+$('go').onclick = connect;
+$('t1').onclick = () => setGate(1, '手動模擬');
+$('t0').onclick = () => setGate(0, '手動模擬');
+connect();
+</script>
+</body>
+</html>
