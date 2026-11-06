@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC 端：MQTT 物件外框監控</title>
+<style>
+  :root { --bg:#10151a; --panel:#1a222a; --ink:#eef3f6; --dim:#8fa1ad; --acc:#3ddc97; --warn:#ff6b5e; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--ink); font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  h1 { font-size:1.2rem; margin:0 0 10px; }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  input { padding:9px; font-size:1rem; border-radius:8px; border:1px solid #33414c; background:var(--panel); color:var(--ink); }
+  #topic { flex:1 1 320px; }
+  button { padding:9px 16px; font-size:1rem; border:0; border-radius:8px; background:var(--acc); color:#06241a; font-weight:600; }
+  #st { color:var(--dim); font-size:.95rem; }
+  .main { display:flex; gap:16px; flex-wrap:wrap; }
+  #view { flex:1 1 480px; max-width:900px; background:#000; border-radius:10px; position:relative; }
+  canvas { width:100%; display:block; border-radius:10px; }
+  #side { flex:1 1 260px; }
+  table { width:100%; border-collapse:collapse; font-size:.95rem; }
+  th, td { text-align:left; padding:6px 4px; border-bottom:1px solid #26323c; }
+  th { color:var(--dim); font-weight:500; }
+  #total { font-size:1.1rem; margin-bottom:8px; }
+</style>
+</head>
+<body>
+<h1>PC 端：MQTT 物件外框監控</h1>
+<div class="bar">
+  <input id="topic" value="nutc/im/s1411331002/objects" aria-label="MQTT Topic">
+  <button id="go">訂閱</button>
+  <span id="st">尚未連線</span>
+</div>
+<div class="main">
+  <div id="view"><canvas id="cv" width="640" height="480"></canvas></div>
+  <div id="side">
+    <div id="total">物件數量：0</div>
+    <table><thead><tr><th>物件</th><th>信心</th><th>外框 x,y,w,h</th></tr></thead><tbody id="rows"></tbody></table>
+    <p id="age" style="color:var(--dim);font-size:.85rem"></p>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let client = null, curTopic = '', lastMsg = 0;
+const color = n => { let h = 0; for (const c of n) h = (h*31 + c.charCodeAt(0)) % 360; return `hsl(${h} 90% 55%)`; };
+
+function connect(){
+  const topic = $('topic').value.trim();
+  if (client) { client.end(true); client = null; }
+  curTopic = topic;
+  $('st').textContent = '連線中…';
+  client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId: 'pc_' + Math.random().toString(16).slice(2, 10), reconnectPeriod: 2000 });
+  client.on('connect', () => client.subscribe(topic, err => {
+    $('st').textContent = err ? '訂閱失敗：' + err.message : '已訂閱 ' + topic + '，等待手機資料…';
+  }));
+  client.on('close', () => $('st').textContent = '連線中斷，重試中…');
+  client.on('error', e => $('st').textContent = '錯誤：' + e.message);
+  client.on('message', (t, buf) => {
+    try { render(JSON.parse(buf.toString())); lastMsg = Date.now(); } catch (e) { console.error(e); }
+  });
+}
+
+function render(d){
+  cv.width = d.w; cv.height = d.h;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, d.w, d.h);
+  const fs = Math.max(14, Math.round(d.w / 32));
+  ctx.font = `600 ${fs}px system-ui, "Noto Sans TC", sans-serif`;
+  ctx.textBaseline = 'top'; ctx.lineWidth = Math.max(2, fs / 6);
+  const rows = [];
+  for (const o of d.objects) {
+    const [x, y, w, h] = o.bbox, c = color(o.name);
+    const label = `${o.zh} ${o.name} ${Math.round(o.score * 100)}%`;
+    ctx.strokeStyle = c; ctx.strokeRect(x, y, w, h);
+    const tw = ctx.measureText(label).width + 10, th = fs + 8, ty = y - th >= 0 ? y - th : y;
+    ctx.fillStyle = c; ctx.fillRect(x, ty, tw, th);
+    ctx.fillStyle = '#000'; ctx.fillText(label, x + 5, ty + 4);
+    rows.push(`<tr><td>${o.zh} ${o.name}</td><td>${Math.round(o.score * 100)}%</td><td>${o.bbox.join(', ')}</td></tr>`);
+  }
+  $('total').textContent = '物件數量：' + d.count;
+  $('rows').innerHTML = rows.join('');
+  $('st').textContent = '接收中 ' + curTopic;
+}
+
+setInterval(() => {
+  if (!lastMsg) return;
+  const s = ((Date.now() - lastMsg) / 1000).toFixed(1);
+  $('age').textContent = `距離上次資料：${s} 秒`;
+}, 500);
+
+$('go').onclick = connect;
+connect();
+</script>
+</body>
+</html>
