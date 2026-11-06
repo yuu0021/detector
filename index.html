@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>手機 AI 即時物件識別 (COCO-SSD)</title>
+<title>手機端：物件識別 + MQTT 發布</title>
 <style>
   :root { --bg:#10151a; --panel:#1a222a; --ink:#eef3f6; --dim:#8fa1ad; --acc:#3ddc97; --warn:#ff6b5e; }
   * { box-sizing:border-box; }
@@ -26,7 +26,7 @@
 </style>
 </head>
 <body>
-<h1>手機 AI 即時物件識別（COCO-SSD）</h1>
+<h1>手機端：AI 物件識別 + MQTT 發布</h1>
 <div id="status">正在載入 AI 模型…</div>
 
 <div id="stage">
@@ -34,6 +34,13 @@
   <canvas id="overlay"></canvas>
 </div>
 
+<label>MQTT Topic
+  <input id="topic" type="text" value="nutc/im/s1411331002/objects" style="width:100%;padding:10px;font-size:1rem;border-radius:8px;border:1px solid #33414c;background:#1a222a;color:#eef3f6">
+</label>
+<label>裝置 ID
+  <input id="dev" type="text" value="phone01" style="width:100%;padding:10px;font-size:1rem;border-radius:8px;border:1px solid #33414c;background:#1a222a;color:#eef3f6">
+</label>
+<div id="mq" style="color:var(--dim);font-size:.9rem;margin:6px 0">MQTT：未連線</div>
 <div id="count">偵測到 0 個物件</div>
 <div id="list"></div>
 
@@ -48,6 +55,7 @@
   <button id="flipBtn" disabled>切換前／後鏡頭</button>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script>
@@ -55,6 +63,28 @@ const ZH = {"person":"人","bicycle":"腳踏車","car":"汽車","motorcycle":"�
 
 const $ = id => document.getElementById(id);
 const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+const BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+let mq = null, lastPub = 0;
+function mqttConnect(){
+  if (mq) return;
+  mq = mqtt.connect(BROKER, { clientId: 'phone_' + Math.random().toString(16).slice(2, 10), reconnectPeriod: 2000 });
+  mq.on('connect', () => $('mq').textContent = 'MQTT：已連線 broker.hivemq.com');
+  mq.on('reconnect', () => $('mq').textContent = 'MQTT：重新連線中…');
+  mq.on('close', () => $('mq').textContent = 'MQTT：未連線');
+  mq.on('error', e => $('mq').textContent = 'MQTT 錯誤：' + e.message);
+}
+function publish(preds, tally){
+  if (!mq || !mq.connected) return;
+  const now = Date.now();
+  if (now - lastPub < 200) return;   // 最多每秒 5 次
+  lastPub = now;
+  const payload = {
+    device: $('dev').value.trim(), ts: now, w: canvas.width, h: canvas.height, count: preds.length, summary: tally,
+    objects: preds.map(p => ({ name: p.class, zh: ZH[p.class] || p.class,
+      score: +p.score.toFixed(3), bbox: p.bbox.map(Math.round) }))
+  };
+  mq.publish($('topic').value.trim(), JSON.stringify(payload));
+}
 let model = null, stream = null, running = false, facing = 'environment', raf = 0;
 
 function setStatus(t){ $('status').textContent = t; }
@@ -87,6 +117,7 @@ async function start(){
     setStatus('正在開啟相機…');
     await openCamera();
     running = true;
+    mqttConnect();
     $('startBtn').disabled = true;
     $('stopBtn').disabled = $('restartBtn').disabled = $('flipBtn').disabled = false;
     setStatus('辨識中…');
@@ -138,10 +169,11 @@ function draw(preds){
     const ty = y - th >= 0 ? y - th : y;
     ctx.fillStyle = c; ctx.fillRect(x, ty, tw, th);
     ctx.fillStyle = '#000'; ctx.fillText(label, x + 5, ty + 4);
-    tally[ZH[p.class] || p.class] = (tally[ZH[p.class] || p.class] || 0) + 1;
+    tally[p.class] = (tally[p.class] || 0) + 1;
   }
+  publish(preds, tally);
   $('count').textContent = `偵測到 ${preds.length} 個物件`;
-  $('list').textContent = Object.entries(tally).map(([k, v]) => `${k} × ${v}`).join('　');
+  $('list').textContent = Object.entries(tally).map(([k, v]) => `${ZH[k] || k} × ${v}`).join('　');
 }
 
 $('th').addEventListener('input', e => { $('thVal').textContent = e.target.value; });
