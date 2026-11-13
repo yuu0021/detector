@@ -75,7 +75,7 @@ const KEY = 'faceDB_v1';
 const $ = id => document.getElementById(id);
 const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
 let db = {}, matcher = null, stream = null, running = false, facing = 'user', raf = 0, busy = false;
-const opts = () => new faceapi.TinyFaceDetectorOptions({ inputSize:320, scoreThreshold:0.5 });
+const opts = () => new faceapi.TinyFaceDetectorOptions({ inputSize:416, scoreThreshold:0.4 });
 
 /* ---------- 資料 ---------- */
 function loadDB(){ try { db = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { db = {}; } }
@@ -140,7 +140,11 @@ async function register(){
 /* ---------- 相機與辨識 ---------- */
 async function openCamera(){
   if (stream) stream.getTracks().forEach(t => t.stop());
-  stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:{ ideal:facing }, width:{ ideal:640 }, height:{ ideal:480 } } });
+  video.srcObject = null;
+  await new Promise(r => setTimeout(r, 300));          // 讓 iOS 先釋放相機
+  const base = { width:{ ideal:640 }, height:{ ideal:480 } };
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...base, facingMode:{ exact:facing } } }); }
+  catch (e) { stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...base, facingMode:{ ideal:facing } } }); }
   video.srcObject = stream; await video.play();
   canvas.width = video.videoWidth; canvas.height = video.videoHeight;
   $('stage').style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;

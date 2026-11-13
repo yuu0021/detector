@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>手機端：人臉辨識 + MQTT 發布</title>
+<style>
+  :root { --bg:#10151a; --panel:#1a222a; --line:#2b3844; --ink:#eef3f6; --dim:#8fa1ad; --acc:#3ddc97; --bad:#ff5d5d; }
+  * { box-sizing:border-box; }
+  body { margin:0 auto; max-width:720px; padding:env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 20px); background:var(--bg); color:var(--ink); font-family:system-ui,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif; }
+  h1 { font-size:1.15rem; margin:14px 0 6px; }
+  h2 { font-size:1rem; margin:0 0 10px; }
+  #status { color:var(--dim); font-size:.9rem; margin-bottom:10px; min-height:1.3em; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  #stage { position:relative; width:100%; background:#000; border-radius:10px; overflow:hidden; aspect-ratio:3/4; margin-bottom:10px; }
+  #video, #overlay { position:absolute; inset:0; width:100%; height:100%; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+  button { flex:1 1 40%; padding:12px; font-size:1rem; border:0; border-radius:8px; background:#2b3844; color:var(--ink); }
+  button.primary { background:var(--acc); color:#06241a; font-weight:600; }
+  button.danger { background:#4a2327; color:#ffb4b4; }
+  button:disabled { opacity:.4; }
+  button:focus-visible, input:focus-visible { outline:3px solid #9fe9c8; outline-offset:2px; }
+  input[type=text] { width:100%; padding:11px; font-size:1rem; border-radius:8px; border:1px solid #33414c; background:var(--bg); color:var(--ink); margin-bottom:8px; }
+  input[type=file] { width:100%; margin-bottom:8px; color:var(--dim); }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  label { display:block; font-size:.95rem; margin:6px 0; }
+  .hint { color:var(--dim); font-size:.82rem; margin:4px 0; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { display:flex; justify-content:space-between; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); }
+  li button { flex:0 0 auto; padding:7px 12px; font-size:.9rem; }
+  #msg { font-size:.9rem; margin-top:6px; white-space:pre-line; }
+</style>
+</head>
+<body>
+<h1>手機端：AI 人臉辨識 + MQTT 發布</h1>
+<div id="status">正在載入人臉辨識模型…</div>
+
+<div class="card">
+  <h2>即時辨識</h2>
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div class="row">
+    <button id="startBtn" class="primary" disabled>啟動相機</button>
+    <button id="stopBtn" disabled>停止</button>
+    <button id="flipBtn" disabled>切換前／後鏡頭</button>
+  </div>
+  <label>人臉特徵距離門檻：<b id="thVal">0.50</b>
+    <input type="range" id="th" min="0.30" max="0.80" step="0.01" value="0.50">
+  </label>
+  <div class="hint">數值越小越嚴格（較不易誤認），越大越寬鬆。畫面上名字後面的數字是距離，可用來調整門檻。</div>
+  <label>MQTT Topic<input id="topic" type="text" value="nutc/im/s1411331002/face" style="margin-bottom:4px"></label>
+  <label>裝置 ID<input id="dev" type="text" value="phone01" style="margin-bottom:4px"></label>
+  <div id="mq" class="hint">MQTT：未連線（只傳姓名、距離與外框，不傳照片）</div>
+</div>
+
+<div class="card">
+  <h2>登錄人臉</h2>
+  <input id="name" type="text" placeholder="輸入姓名">
+  <input id="files" type="file" accept="image/*" multiple>
+  <button id="regBtn" class="primary" style="width:100%" disabled>登錄</button>
+  <div class="hint">建議每人 2～3 張不同角度的清晰正面照，一張照片只放一張臉。同名再登錄會累加照片。</div>
+  <div id="msg"></div>
+</div>
+
+<div class="card">
+  <h2>已登錄人員（<span id="n">0</span>）</h2>
+  <ul id="list"></ul>
+  <button id="clearBtn" class="danger" style="width:100%;margin-top:10px">清除全部人臉資料</button>
+  <div class="hint">人臉特徵只存在這支手機瀏覽器的 localStorage，不會上傳。清除瀏覽器資料也會一併消失。</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
+<script>
+const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/';
+const KEY = 'faceDB_v1';
+const $ = id => document.getElementById(id);
+const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
+let db = {}, matcher = null, stream = null, running = false, facing = 'user', raf = 0, busy = false;
+const opts = () => new faceapi.TinyFaceDetectorOptions({ inputSize:416, scoreThreshold:0.4 });
+
+/* ---------- 資料 ---------- */
+function loadDB(){ try { db = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { db = {}; } }
+function saveDB(){
+  try { localStorage.setItem(KEY, JSON.stringify(db)); }
+  catch (e) { $('msg').textContent = '儲存失敗（可能是無痕模式或空間不足）：' + e.message; }
+}
+function buildMatcher(){
+  const labeled = Object.entries(db).filter(([, d]) => d.length)
+    .map(([n, d]) => new faceapi.LabeledFaceDescriptors(n, d.map(a => new Float32Array(a))));
+  matcher = labeled.length ? new faceapi.FaceMatcher(labeled, +$('th').value) : null;
+}
+function renderList(){
+  const names = Object.keys(db);
+  $('n').textContent = names.length;
+  $('list').innerHTML = '';
+  if (!names.length) { $('list').innerHTML = '<li><span class="hint">尚未登錄任何人</span></li>'; return; }
+  for (const n of names) {
+    const li = document.createElement('li');
+    const sp = document.createElement('span'); sp.textContent = `${n}（${db[n].length} 張）`;
+    const b = document.createElement('button'); b.className = 'danger'; b.textContent = '刪除';
+    b.onclick = () => { if (confirm(`確定刪除「${n}」？`)) { delete db[n]; saveDB(); buildMatcher(); renderList(); } };
+    li.append(sp, b); $('list').append(li);
+  }
+}
+
+/* ---------- 模型 ---------- */
+async function loadModels(){
+  try {
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+    ]);
+    $('status').textContent = '模型已就緒。';
+    $('startBtn').disabled = false; $('regBtn').disabled = false;
+  } catch (e) { $('status').textContent = '模型載入失敗：' + e.message; }
+}
+
+/* ---------- 登錄 ---------- */
+async function register(){
+  const name = $('name').value.trim(), files = [...$('files').files];
+  if (!name) { $('msg').textContent = '請先輸入姓名。'; return; }
+  if (!files.length) { $('msg').textContent = '請選擇至少一張照片。'; return; }
+  $('regBtn').disabled = true;
+  let ok = 0; const lines = [];
+  for (let i = 0; i < files.length; i++) {
+    $('msg').textContent = `處理中 ${i + 1}/${files.length}…`;
+    try {
+      const img = await faceapi.bufferToImage(files[i]);
+      const faces = await faceapi.detectAllFaces(img, new faceapi.TinyFaceDetectorOptions({ inputSize:416, scoreThreshold:0.5 }))
+        .withFaceLandmarks().withFaceDescriptors();
+      if (faces.length === 1) { (db[name] = db[name] || []).push(Array.from(faces[0].descriptor)); ok++; }
+      else lines.push(`第 ${i + 1} 張：${faces.length ? '偵測到多張臉，已略過' : '找不到人臉，已略過'}`);
+    } catch (e) { lines.push(`第 ${i + 1} 張：讀取失敗`); }
+  }
+  if (ok) { saveDB(); buildMatcher(); renderList(); }
+  $('msg').textContent = `「${name}」成功登錄 ${ok} 張。` + (lines.length ? '\n' + lines.join('\n') : '');
+  $('files').value = ''; $('regBtn').disabled = false;
+}
+
+/* ---------- 相機與辨識 ---------- */
+async function openCamera(){
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+  await new Promise(r => setTimeout(r, 300));          // 讓 iOS 先釋放相機
+  const base = { width:{ ideal:640 }, height:{ ideal:480 } };
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...base, facingMode:{ exact:facing } } }); }
+  catch (e) { stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ ...base, facingMode:{ ideal:facing } } }); }
+  video.srcObject = stream; await video.play();
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  $('stage').style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+}
+async function start(){
+  if (running) return;
+  try {
+    await openCamera(); running = true; mqttConnect();
+    $('startBtn').disabled = true; $('stopBtn').disabled = $('flipBtn').disabled = false;
+    $('status').textContent = Object.keys(db).length ? '辨識中…' : '辨識中…（尚未登錄任何人，所有人臉會顯示為陌生人）';
+    loop();
+  } catch (e) { $('status').textContent = '無法開啟相機：' + e.message + '（需 HTTPS 並允許相機權限）'; }
+}
+function stop(){
+  running = false; cancelAnimationFrame(raf);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; video.srcObject = null; ctx.clearRect(0, 0, canvas.width, canvas.height); publish([], true);
+  $('startBtn').disabled = false; $('stopBtn').disabled = $('flipBtn').disabled = true;
+  $('status').textContent = '已停止。';
+}
+async function flip(){ facing = facing === 'user' ? 'environment' : 'user'; if (running) try { await openCamera(); } catch (e) { $('status').textContent = '切換失敗：' + e.message; } }
+
+async function loop(){
+  if (!running) return;
+  if (!busy && video.readyState >= 2) {
+    busy = true;
+    try {
+      const size = { width:video.videoWidth, height:video.videoHeight };
+      const dets = faceapi.resizeResults(await faceapi.detectAllFaces(video, opts()).withFaceLandmarks().withFaceDescriptors(), size);
+      draw(dets);
+    } catch (e) { console.error(e); }
+    busy = false;
+  }
+  raf = requestAnimationFrame(loop);
+}
+function draw(dets){
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const fs = Math.max(15, Math.round(canvas.width / 28));
+  ctx.font = `700 ${fs}px system-ui, "Noto Sans TC", sans-serif`; ctx.textBaseline = 'top'; ctx.lineWidth = Math.max(3, fs / 5);
+  const out = [];
+  for (const d of dets) {
+    const { x, y, width, height } = d.detection.box;
+    let known = false, label = '陌生人', who = '陌生人', dist = null;
+    if (matcher) {
+      const m = matcher.findBestMatch(d.descriptor);
+      known = m.label !== 'unknown';
+      label = (known ? m.label : '陌生人') + ' ' + m.distance.toFixed(2);
+      who = known ? m.label : '陌生人'; dist = +m.distance.toFixed(3);
+    }
+    out.push({ name:who, known, distance:dist, bbox:[x, y, width, height].map(Math.round) });
+    const c = known ? '#3ddc57' : '#ff4d4d';
+    ctx.strokeStyle = c; ctx.strokeRect(x, y, width, height);
+    const tw = ctx.measureText(label).width + 12, th = fs + 10, ty = y - th >= 0 ? y - th : y + height;
+    ctx.fillStyle = c; ctx.fillRect(x, ty, tw, th);
+    ctx.fillStyle = '#000'; ctx.fillText(label, x + 6, ty + 5);
+  }
+  publish(out);
+}
+
+/* ---------- MQTT ---------- */
+let mq = null, lastPub = 0;
+function mqttConnect(){
+  if (mq) return;
+  mq = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId:'face_phone_' + Math.random().toString(16).slice(2, 10), reconnectPeriod:2000 });
+  mq.on('connect', () => $('mq').textContent = 'MQTT：已連線 broker.hivemq.com');
+  mq.on('reconnect', () => $('mq').textContent = 'MQTT：重新連線中…');
+  mq.on('error', e => $('mq').textContent = 'MQTT 錯誤：' + e.message);
+}
+function publish(faces, force){
+  if (!mq || !mq.connected) return;
+  const now = Date.now();
+  if (!force && now - lastPub < 200) return;
+  lastPub = now;
+  mq.publish($('topic').value.trim(), JSON.stringify({
+    device:$('dev').value.trim(), ts:now, w:canvas.width, h:canvas.height,
+    known:faces.filter(f => f.known).length, unknown:faces.filter(f => !f.known).length, faces
+  }));
+}
+
+/* ---------- 事件 ---------- */
+$('th').oninput = e => { $('thVal').textContent = (+e.target.value).toFixed(2); buildMatcher(); };
+$('startBtn').onclick = start; $('stopBtn').onclick = stop; $('flipBtn').onclick = flip;
+$('regBtn').onclick = register;
+$('clearBtn').onclick = () => { if (Object.keys(db).length && confirm('確定清除全部人臉資料？此動作無法復原。')) { db = {}; saveDB(); buildMatcher(); renderList(); } };
+
+loadDB(); renderList(); loadModels().then(buildMatcher);
+</script>
+</body>
+</html>
