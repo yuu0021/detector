@@ -78,7 +78,7 @@ const video = $('video'), canvas = $('overlay'), ctx = canvas.getContext('2d');
 const work = document.createElement('canvas'), wctx = work.getContext('2d', { willReadFrequently:true });
 const cc = document.createElement('canvas'), cctx = cc.getContext('2d', { willReadFrequently:true });
 let worker = null, stream = null, running = false, facing = 'environment', ocrBusy = false;
-let votes = [], confirmed = '', lastDetect = 0, lastOcr = 0, liveText = '', raf = 0;
+let lastSeen = 0, votes = [], confirmed = '', lastDetect = 0, lastOcr = 0, liveText = '', raf = 0;
 const TW = 320, ROI = { x:0.12, y:0.25, w:0.76, h:0.5 };
 
 /* ---------- 1. 車牌定位（垂直邊緣密度 + 連通區域） ---------- */
@@ -205,12 +205,13 @@ async function readPlate(src, sw, sh, b){
   return fixed ? fixed.text : null;
 }
 function vote(t){
-  if (!t) return;
-  votes.push(t); if (votes.length > 8) votes.shift();
-  const c = {}; votes.forEach(v => c[v] = (c[v] || 0) + 1);
-  const [top, n] = Object.entries(c).sort((a, b) => b[1] - a[1])[0];
-  $('plate').textContent = top;
-  if (n >= 3) setConfirmed(top); else { $('plate').className = ''; $('live').textContent = liveText + `（票數 ${n}/3）`; }
+  votes.push(t); if (votes.length > 6) votes.shift();          // 讀不到(null)也計入，讓舊車牌的票數會過期
+  const c = {}; votes.forEach(v => { if (v) c[v] = (c[v] || 0) + 1; });
+  const ent = Object.entries(c).sort((a, b) => b[1] - a[1]);
+  if (!ent.length) return;
+  const [top, n] = ent[0];
+  if (n >= 3) setConfirmed(top);
+  else { if (!confirmed) { $('plate').textContent = top; $('plate').className = ''; } $('live').textContent = liveText + `（票數 ${n}/3）`; }
 }
 function setConfirmed(t){
   $('plate').textContent = t; $('plate').className = 'ok'; $('copyBtn').disabled = false;
@@ -262,6 +263,7 @@ function loop(){
     lastDetect = now;
     const sw = video.videoWidth, sh = video.videoHeight, useRoi = $('roiOn').checked;
     const cands = locate(video, sw, sh, useRoi);
+    if (cands.length) lastSeen = now; else if (now - lastSeen > 2000 && (confirmed || votes.length)) resetVotes();   // 車牌離開畫面 2 秒就重置
     ctx.clearRect(0, 0, sw, sh); drawBoxes(cands, useRoi); publish(cands[0], sw, sh);
     if (cands.length && !ocrBusy && worker && now - lastOcr > 500) {
       ocrBusy = true; lastOcr = now;
