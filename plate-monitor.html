@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PC 端：MQTT 車牌辨識監控</title>
+<style>
+  :root { --bg:#0e1322; --panel:#171e33; --card:#1d2640; --line:#2b3658; --ink:#eaf0ff; --dim:#93a0c4; --acc:#4f7cff; --ok:#3ddc57; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--ink); font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif; }
+  .wrap { max-width:1000px; margin:0 auto; }
+  h1 { font-size:1.5rem; margin:0 0 6px; }
+  .sub { color:var(--dim); margin:0 0 16px; font-size:.95rem; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:16px; }
+  .ctl { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:.8rem; color:var(--dim); }
+  #topic { width:min(420px,80vw); } #dev { width:180px; }
+  input { padding:10px; font-size:.95rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--ink); }
+  button { padding:10px 16px; font-size:.95rem; border:0; border-radius:8px; background:var(--acc); color:#fff; font-weight:600; }
+  button.gray { background:#2b3658; }
+  button:focus-visible, input:focus-visible { outline:3px solid #9db6ff; outline-offset:2px; }
+  #st { margin:10px 0 2px; color:#8fb0ff; font-size:.95rem; }
+  .main { display:flex; gap:16px; flex-wrap:wrap; }
+  #left { flex:2 1 420px; }
+  #right { flex:1 1 260px; min-width:0; }
+  #big { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:3rem; font-weight:800; letter-spacing:.06em; text-align:center; padding:18px 8px; border-radius:12px; background:#0b0f1c; border:2px solid var(--line); margin-bottom:6px; }
+  #big.ok { color:var(--ok); border-color:var(--ok); }
+  #state { text-align:center; color:var(--dim); margin-bottom:12px; font-size:.95rem; }
+  #stage { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#000; }
+  canvas { width:100%; display:block;
+    background-image:linear-gradient(#1b2340 1px,transparent 1px),linear-gradient(90deg,#1b2340 1px,transparent 1px); background-size:48px 48px; }
+  .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:12px; }
+  .stat { background:var(--card); border-radius:10px; padding:12px 6px; text-align:center; }
+  .stat b { display:block; font-size:1.4rem; } .stat span { font-size:.78rem; color:var(--dim); }
+  #log { margin:0; padding-left:20px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.95rem; max-height:320px; overflow:auto; }
+  #log li { padding:3px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🖥️ PC 端：MQTT 車牌辨識監控</h1>
+  <p class="sub">訂閱手機的車牌辨識結果，顯示確認的車牌號碼與外框位置；不接收、不顯示照片。</p>
+
+  <div class="panel">
+    <div class="ctl">
+      <label>MQTT Topic<input id="topic" value="nutc/im/s1411331002/plate"></label>
+      <label>裝置 ID 過濾（留空接收所有）<input id="dev" value="phone01"></label>
+      <button id="go">▶ 連線訂閱</button>
+      <button id="stop" class="gray">■ 中斷</button>
+      <button id="clear" class="gray">清除紀錄</button>
+    </div>
+    <div id="st">尚未連線</div>
+  </div>
+
+  <div class="main">
+    <div id="left" class="panel">
+      <div id="big">— — —</div>
+      <div id="state">等待資料…</div>
+      <div id="stage"><canvas id="cv" width="640" height="360"></canvas></div>
+    </div>
+    <div id="right" class="panel">
+      <div class="stats">
+        <div class="stat"><b id="sN">0</b><span>確認次數</span></div>
+        <div class="stat"><b id="sU">0</b><span>不同車牌</span></div>
+        <div class="stat"><b id="sAge">-</b><span>距上次訊息（秒）</span></div>
+      </div>
+      <b>確認紀錄</b>
+      <ol id="log" reversed></ol>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let client = null, topic = '', last = 0, lastPlate = '', n = 0; const uniq = new Set();
+
+function disconnect(m){ if (client) { client.end(true); client = null; } $('st').textContent = m || '已中斷'; }
+function connect(){
+  disconnect('連線中…'); topic = $('topic').value.trim();
+  client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', { clientId:'plate_pc_' + Math.random().toString(16).slice(2, 10), reconnectPeriod:2000 });
+  client.on('connect', () => client.subscribe(topic, e => $('st').textContent = e ? '訂閱失敗：' + e.message : `已訂閱 ${topic}，等待手機訊息…`));
+  client.on('close', () => { if (client) $('st').textContent = '連線中斷，重試中…'; });
+  client.on('error', e => $('st').textContent = '錯誤：' + e.message);
+  client.on('message', (t, buf) => {
+    try { const d = JSON.parse(buf.toString()), f = $('dev').value.trim(); if (f && d.device !== f) return; last = Date.now(); render(d); }
+    catch (e) { console.error(e); }
+  });
+}
+
+function render(d){
+  cv.width = d.w; cv.height = d.h; ctx.clearRect(0, 0, d.w, d.h);
+  const fs = Math.max(14, Math.round(d.w / 34));
+  ctx.lineWidth = Math.max(3, fs / 5); ctx.font = `700 ${fs}px system-ui, sans-serif`; ctx.textBaseline = 'top';
+  if (d.bbox) {
+    const [x, y, w, h] = d.bbox, c = d.plate ? '#3ddc57' : '#ffc233', t = d.plate || '辨識中';
+    ctx.strokeStyle = c; ctx.strokeRect(x, y, w, h);
+    const tw = ctx.measureText(t).width + 12, ty = Math.max(0, y - fs - 10);
+    ctx.fillStyle = c; ctx.fillRect(x, ty, tw, fs + 10); ctx.fillStyle = '#000'; ctx.fillText(t, x + 6, ty + 5);
+  }
+  const big = $('big');
+  if (d.plate) {
+    big.textContent = d.plate; big.className = 'ok'; $('state').textContent = '已確認';
+    if (d.plate !== lastPlate) {
+      lastPlate = d.plate; n++; uniq.add(d.plate);
+      const li = document.createElement('li'); li.textContent = `${new Date().toLocaleTimeString()}　${d.plate}`; $('log').prepend(li);
+      $('sN').textContent = n; $('sU').textContent = uniq.size;
+    }
+  } else {
+    big.className = ''; big.textContent = d.live || '— — —';
+    $('state').textContent = d.bbox ? '找到車牌，辨識中…' : '畫面中沒有車牌';
+    if (!d.bbox) lastPlate = '';
+  }
+  $('st').textContent = `接收中 ${topic}`;
+}
+
+setInterval(() => { $('sAge').textContent = last ? ((Date.now() - last) / 1000).toFixed(1) : '-'; }, 300);
+$('go').onclick = connect; $('stop').onclick = () => disconnect();
+$('clear').onclick = () => { $('log').innerHTML = ''; n = 0; uniq.clear(); lastPlate = ''; $('sN').textContent = $('sU').textContent = 0; };
+connect();
+</script>
+</body>
+</html>
